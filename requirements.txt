@@ -4,4 +4,7 @@ pillow==11.1.0
 opencv-python-headless==4.11.0.86
 numpy==2.2.4
 requests==2.32.3
-python-multipart==0.0.9 
+python-multipart==0.0.9
+torch>=1.7.1
+ftfy
+clip @ git+https://github.com/openai/CLIP.git 

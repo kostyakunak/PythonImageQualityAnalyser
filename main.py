@@ -4,10 +4,14 @@ from PIL import Image
 import requests
 from io import BytesIO
 import numpy as np
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple, Optional
 import cv2
 import logging
 from datetime import datetime
+import torch
+import clip
+import os
+import json
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, 
@@ -15,6 +19,17 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Instagram Content Analyzer")
+
+# Инициализация модели CLIP
+device = "cuda" if torch.cuda.is_available() else "cpu"
+logger.info(f"Запуск CLIP на устройстве: {device}")
+try:
+    clip_model, preprocess = clip.load("ViT-B/32", device=device)
+    logger.info("Модель CLIP успешно загружена")
+except Exception as e:
+    logger.error(f"Ошибка загрузки модели CLIP: {str(e)}")
+    clip_model = None
+    preprocess = None
 
 # Типы изображений, которые мы распознаем
 IMAGE_TYPES = {
@@ -409,12 +424,207 @@ def analyze_contrast(img_array):
     return max(0.6, adjusted_score)
 
 def analyze_noise(gray_img):
-    """Анализирует шум на изображении"""
-    denoised = cv2.medianBlur(gray_img, 5)
-    noise_diff = np.abs(gray_img.astype(np.float32) - denoised.astype(np.float32))
-    noise_amount = np.mean(noise_diff) / 255
-    noise_score = 1.0 - min(1.0, noise_amount * 10)
+    """Анализирует шум изображения"""
+    # Метод на основе оценки шума
+    noise_score = 5.0 - (np.std(gray_img - cv2.GaussianBlur(gray_img, (5, 5), 0)) / 2)
+    
+    # Применяем нелинейную функцию для повышения оценки изображений с низким шумом
+    noise_score = min(5.0, max(1.0, noise_score))
+    
     return noise_score
+
+def extract_image_context(img_rgb) -> Dict[str, float]:
+    """
+    Извлекает контекстную информацию из изображения с помощью CLIP.
+    Возвращает словарь с вероятностями различных контекстных аспектов.
+    """
+    if clip_model is None or preprocess is None:
+        logger.warning("Модель CLIP не доступна, используем заглушку для контекста")
+        return {"error": "CLIP model not available"}
+    
+    try:
+        # Подготовка изображения
+        pil_image = Image.fromarray(img_rgb)
+        processed_image = preprocess(pil_image).unsqueeze(0).to(device)
+        
+        # Контекстные категории для проверки
+        context_groups = {
+            "subject": ["человек", "природа", "объект", "животное", "архитектура", "текст"],
+            "style": ["реалистичный", "абстрактный", "минималистичный", "детализированный", "художественный"],
+            "mood": ["яркий", "темный", "спокойный", "энергичный", "меланхоличный"],
+            "setting": ["помещение", "студия", "природа", "город", "рабочее пространство"],
+            "activity": ["творческий процесс", "отдых", "работа", "презентация", "событие"],
+            "commercial": ["реклама", "продукт", "бренд", "продажа", "коммерческий"],
+            "creative_type": ["рисунок", "живопись", "фотография", "скульптура", "дизайн", "рукоделие"]
+        }
+        
+        # Результаты контекстного анализа
+        context_results = {}
+        
+        with torch.no_grad():
+            # Кодируем изображение один раз
+            image_features = clip_model.encode_image(processed_image)
+            image_features /= image_features.norm(dim=-1, keepdim=True)
+            
+            # Анализируем каждую группу контекста
+            for group_name, categories in context_groups.items():
+                # Токенизируем категории
+                text_tokens = clip.tokenize(categories).to(device)
+                text_features = clip_model.encode_text(text_tokens)
+                text_features /= text_features.norm(dim=-1, keepdim=True)
+                
+                # Рассчитываем вероятности
+                similarity = (100.0 * image_features @ text_features.T).softmax(dim=-1)
+                
+                # Сохраняем результаты для группы
+                for i, category in enumerate(categories):
+                    context_results[f"{group_name}_{category}"] = float(similarity[0][i])
+        
+        return context_results
+    except Exception as e:
+        logger.error(f"Ошибка при извлечении контекста: {str(e)}")
+        return {"error": str(e)}
+
+def evaluate_profile_match(contexts: List[Dict[str, float]], profile_type: str = "creative") -> Tuple[float, str]:
+    """
+    Анализирует набор контекстов изображений и определяет соответствие профилю.
+    Возвращает оценку соответствия и причину.
+    """
+    # Профили и их важные признаки
+    profiles = {
+        "creative": {
+            "positive": ["activity_творческий процесс", "setting_рабочее пространство", 
+                        "creative_type_рисунок", "creative_type_живопись", "creative_type_скульптура", 
+                        "creative_type_дизайн", "creative_type_рукоделие", "style_художественный"],
+            "negative": ["commercial_реклама", "commercial_продажа", "commercial_бренд"]
+        },
+        "commercial": {
+            "positive": ["commercial_продукт", "commercial_бренд", "subject_объект"],
+            "negative": []
+        }
+    }
+    
+    # Проверяем наличие профиля
+    if profile_type not in profiles:
+        return 0.0, "Неизвестный тип профиля"
+    
+    # Проверяем наличие контекстов
+    if not contexts or all("error" in context for context in contexts):
+        return 0.0, "Недостаточно данных для анализа"
+    
+    # Фильтруем контексты с ошибками
+    valid_contexts = [context for context in contexts if "error" not in context]
+    if not valid_contexts:
+        return 0.0, "Все контексты содержат ошибки"
+    
+    # Расчет средних значений контекста по всем изображениям
+    avg_context = {}
+    for context in valid_contexts:
+        for key, value in context.items():
+            if key in avg_context:
+                avg_context[key] += value
+            else:
+                avg_context[key] = value
+    
+    # Делим на количество изображений
+    for key in avg_context:
+        avg_context[key] /= len(valid_contexts)
+    
+    # Рассчитываем оценку соответствия
+    profile_score = 0.0
+    reason = "Недостаточно данных"
+    
+    # Положительные признаки
+    positive_scores = [avg_context.get(key, 0.0) for key in profiles[profile_type]["positive"]]
+    if positive_scores:
+        max_positive = max(positive_scores)
+        avg_positive = sum(positive_scores) / len(positive_scores)
+        
+        # Отрицательные признаки
+        negative_scores = [avg_context.get(key, 0.0) for key in profiles[profile_type]["negative"]]
+        max_negative = max(negative_scores) if negative_scores else 0.0
+        
+        # Финальная оценка (выше если положительные признаки высокие, а отрицательные низкие)
+        profile_score = avg_positive * (1.0 - max_negative)
+        
+        # Определяем причину
+        if profile_score > 0.6:
+            reason = f"Высокое соответствие профилю {profile_type}"
+        elif profile_score > 0.3:
+            reason = f"Среднее соответствие профилю {profile_type}"
+        else:
+            if max_negative > 0.5:
+                reason = "Обнаружены признаки коммерческого контента"
+            else:
+                reason = f"Низкое соответствие профилю {profile_type}"
+    
+    return profile_score, reason
+
+def classify_image_with_clip(img_rgb) -> Tuple[str, float]:
+    """
+    Классификация изображения с помощью CLIP.
+    Возвращает тип изображения и уверенность в классификации.
+    """
+    if clip_model is None or preprocess is None:
+        logger.warning("Модель CLIP не доступна, используем простую классификацию")
+        return "other", 0.0
+    
+    try:
+        # Подготовка изображения
+        pil_image = Image.fromarray(img_rgb)
+        processed_image = preprocess(pil_image).unsqueeze(0).to(device)
+        
+        # Категории для классификации
+        categories = [
+            "портрет человека или животного", 
+            "пейзаж или природа", 
+            "абстрактное изображение или искусство", 
+            "продукт или товар", 
+            "творческий процесс создания", 
+            "рабочее пространство художника",
+            "коммерческая реклама",
+            "другое изображение"
+        ]
+        
+        # Токенизация категорий
+        text_tokens = clip.tokenize(categories).to(device)
+        
+        # Получение предсказаний
+        with torch.no_grad():
+            image_features = clip_model.encode_image(processed_image)
+            text_features = clip_model.encode_text(text_tokens)
+            
+            # Нормализация
+            image_features /= image_features.norm(dim=-1, keepdim=True)
+            text_features /= text_features.norm(dim=-1, keepdim=True)
+            
+            # Расчет сходства
+            similarity = (100.0 * image_features @ text_features.T).softmax(dim=-1)
+            
+        # Определение лучшей категории
+        best_idx = similarity[0].argmax().item()
+        best_category = categories[best_idx]
+        confidence = similarity[0][best_idx].item()
+        
+        # Преобразование в существующие категории
+        if "портрет" in best_category:
+            return "portrait", confidence
+        elif "пейзаж" in best_category or "природа" in best_category:
+            return "landscape", confidence
+        elif "абстрактное" in best_category:
+            return "abstract", confidence
+        elif "продукт" in best_category or "товар" in best_category:
+            return "product", confidence
+        elif "творческий процесс" in best_category or "рабочее пространство" in best_category:
+            return "creative_process", confidence
+        elif "коммерческая реклама" in best_category:
+            return "commercial", confidence
+        else:
+            return "other", confidence
+            
+    except Exception as e:
+        logger.error(f"Ошибка при классификации с CLIP: {str(e)}")
+        return "other", 0.0
 
 @app.post("/analyze")
 async def analyze_image(
@@ -445,37 +655,72 @@ async def analyze_image(
         # Преобразуем в RGB для правильной работы с цветами
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
+        # Извлекаем контекст изображения с помощью CLIP
+        image_context = extract_image_context(img_rgb)
+        
+        # Определяем тип изображения с помощью CLIP
+        image_type, type_confidence = classify_image_with_clip(img_rgb)
+        
+        # Если CLIP классификация не работает, используем стандартную
+        if type_confidence < 0.3:
+            # Конвертируем в градации серого для анализа
+            gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            # Используем стандартную классификацию
+            pil_img = Image.fromarray(img_rgb)
+            image_type = simple_classify_image(pil_img, gray_img)
+        
+        # Обрабатываем возможное добавление новых типов изображений
+        if image_type not in QUALITY_WEIGHTS:
+            if image_type == "creative_process":
+                # Используем веса близкие к абстрактным изображениям, но с акцентом на детали
+                image_type = "abstract"
+            elif image_type == "commercial":
+                # Используем веса близкие к продуктовым изображениям
+                image_type = "product"
+        
         # Получаем все метрики
-        blur_score = analyze_blur(img)
+        # Конвертируем в градации серого для некоторых анализов
+        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        blur_score = analyze_blur(gray_img, image_type)
         brightness_score = analyze_brightness(img_rgb)
         contrast_score = analyze_contrast(img_rgb)
-        noise_score = analyze_noise(img)
-        
-        # Определяем тип изображения
-        image_type = classify_image_type(img_rgb)
-        
-        # Получаем оценки с учетом типа изображения
-        adjusted_blur = adjust_blur_score_by_image_type(blur_score, image_type)
-        adjusted_brightness = adjust_brightness_score_by_image_type(brightness_score, image_type)
-        adjusted_contrast = adjust_contrast_score_by_image_type(contrast_score, image_type)
+        noise_score = analyze_noise(gray_img)
         
         # Вычисляем общую оценку
-        overall_score = calculate_overall_score(adjusted_blur, adjusted_brightness, adjusted_contrast, noise_score, image_type)
+        overall_score = calculate_overall_score(blur_score, brightness_score, contrast_score, noise_score, image_type)
         
         # Определяем статус на основе общей оценки
         status = STATUS_QUALITY_CHECKED if overall_score >= QUALITY_SCORE_THRESHOLD else STATUS_QUALITY_REJECTED
         
+        # Анализируем соответствие профилю (если предоставлены данные о нескольких изображениях)
+        profile_match_score = None
+        profile_match_reason = None
+        
+        if creator_data and "contexts" in creator_data:
+            # Добавляем текущий контекст
+            creator_data["contexts"].append(image_context)
+            profile_match_score, profile_match_reason = evaluate_profile_match(creator_data["contexts"], "creative")
+        
         # Формируем ответ
         response_data = {
-            "blur_score": round(adjusted_blur, 2),
-            "brightness_score": round(adjusted_brightness, 2),
-            "contrast_score": round(adjusted_contrast, 2),
+            "blur_score": round(blur_score, 2),
+            "brightness_score": round(brightness_score, 2),
+            "contrast_score": round(contrast_score, 2),
             "noise_score": round(noise_score, 2),
             "overall_score": round(overall_score, 2),
             "image_type": image_type,
+            "type_confidence": round(type_confidence, 2) if type_confidence > 0 else None,
             "status": status,
+            "context": image_context,
             "timestamp": datetime.now().isoformat()
         }
+        
+        # Добавляем оценку соответствия профилю, если она есть
+        if profile_match_score is not None:
+            response_data["profile_match"] = {
+                "score": round(profile_match_score, 2),
+                "reason": profile_match_reason
+            }
         
         # Если были переданы данные о креаторе, добавляем их в ответ
         if creator_data:
@@ -484,7 +729,70 @@ async def analyze_image(
         return response_data
         
     except Exception as e:
+        logger.error(f"Ошибка при анализе изображения: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Ошибка при анализе изображения: {str(e)}")
+
+@app.post("/analyze-context")
+async def extract_context(
+    image_url: str = Form(None),
+    image_file: UploadFile = File(None),
+):
+    """
+    Извлекает только контекстную информацию из изображения без анализа качества.
+    
+    Можно предоставить либо URL изображения, либо файл изображения.
+    """
+    
+    if image_url is None and image_file is None:
+        raise HTTPException(status_code=400, detail="Необходимо предоставить либо URL изображения, либо файл изображения.")
+    
+    try:
+        if image_url:
+            response = requests.get(image_url)
+            img_array = np.array(bytearray(response.content), dtype=np.uint8)
+            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        else:
+            contents = await image_file.read()
+            img_array = np.array(bytearray(contents), dtype=np.uint8)
+            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        
+        # Преобразуем в RGB для правильной работы с цветами
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # Извлекаем контекст изображения с помощью CLIP
+        image_context = extract_image_context(img_rgb)
+        
+        # Определяем тип изображения с помощью CLIP
+        image_type, type_confidence = classify_image_with_clip(img_rgb)
+        
+        # Собираем базовую информацию о контексте
+        top_categories = {}
+        
+        for key, value in image_context.items():
+            if key != "error":
+                category_type = key.split("_")[0]
+                if category_type not in top_categories:
+                    top_categories[category_type] = []
+                top_categories[category_type].append((key.split("_", 1)[1], value))
+        
+        # Находим топ-категории для каждого типа
+        top_results = {}
+        for category_type, items in top_categories.items():
+            sorted_items = sorted(items, key=lambda x: x[1], reverse=True)
+            top_results[category_type] = sorted_items[:2]  # Берем две лучшие категории
+        
+        # Формируем ответ
+        return {
+            "context": image_context,
+            "image_type": image_type,
+            "type_confidence": round(type_confidence, 2) if type_confidence > 0 else None,
+            "top_categories": top_results,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка при извлечении контекста: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка при извлечении контекста: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
