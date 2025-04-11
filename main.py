@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Form, File, Body
 from pydantic import BaseModel
 from PIL import Image
 import requests
@@ -7,6 +7,7 @@ import numpy as np
 from typing import List, Dict, Any
 import cv2
 import logging
+from datetime import datetime
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, 
@@ -57,6 +58,11 @@ QUALITY_WEIGHTS = {
         "noise": 0.15       # Средняя важность шума
     }
 }
+
+# Добавим новые константы для определения статуса
+QUALITY_SCORE_THRESHOLD = 3.0  # Минимальный порог для прохождения проверки
+STATUS_QUALITY_CHECKED = "QualityChecked"
+STATUS_QUALITY_REJECTED = "Rejected"
 
 class ImageAnalysisRequest(BaseModel):
     image_urls: List[str]
@@ -264,7 +270,7 @@ def analyze_image_quality(img, url):
     # Анализ базовых параметров
     blur_score = analyze_blur(gray_img, image_type)
     brightness_score = analyze_brightness(img_array)
-    contrast_score = analyze_contrast(gray_img)
+    contrast_score = analyze_contrast(img_array)
     noise_score = analyze_noise(gray_img)
     
     # Подробные метрики
@@ -391,9 +397,9 @@ def analyze_brightness(img_array):
     
     return brightness_score
 
-def analyze_contrast(gray_img):
+def analyze_contrast(img_array):
     """Анализирует контраст изображения"""
-    std_dev = np.std(gray_img) / 128
+    std_dev = np.std(img_array) / 128
     
     # Применяем нелинейную функцию для повышения оценки низкоконтрастных изображений
     # Это обеспечит, что даже при низком стандартном отклонении оценка будет выше
@@ -409,6 +415,76 @@ def analyze_noise(gray_img):
     noise_amount = np.mean(noise_diff) / 255
     noise_score = 1.0 - min(1.0, noise_amount * 10)
     return noise_score
+
+@app.post("/analyze")
+async def analyze_image(
+    image_url: str = Form(None),
+    image_file: UploadFile = File(None),
+    creator_data: dict = Body(None)
+):
+    """
+    Анализирует изображение и возвращает оценки качества.
+    
+    Можно предоставить либо URL изображения, либо файл изображения.
+    Опционально можно передать данные о креаторе и метрики из Instagram.
+    """
+    
+    if image_url is None and image_file is None:
+        raise HTTPException(status_code=400, detail="Необходимо предоставить либо URL изображения, либо файл изображения.")
+    
+    try:
+        if image_url:
+            response = requests.get(image_url)
+            img_array = np.array(bytearray(response.content), dtype=np.uint8)
+            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        else:
+            contents = await image_file.read()
+            img_array = np.array(bytearray(contents), dtype=np.uint8)
+            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        
+        # Преобразуем в RGB для правильной работы с цветами
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # Получаем все метрики
+        blur_score = analyze_blur(img)
+        brightness_score = analyze_brightness(img_rgb)
+        contrast_score = analyze_contrast(img_rgb)
+        noise_score = analyze_noise(img)
+        
+        # Определяем тип изображения
+        image_type = classify_image_type(img_rgb)
+        
+        # Получаем оценки с учетом типа изображения
+        adjusted_blur = adjust_blur_score_by_image_type(blur_score, image_type)
+        adjusted_brightness = adjust_brightness_score_by_image_type(brightness_score, image_type)
+        adjusted_contrast = adjust_contrast_score_by_image_type(contrast_score, image_type)
+        
+        # Вычисляем общую оценку
+        overall_score = calculate_overall_score(adjusted_blur, adjusted_brightness, adjusted_contrast, noise_score, image_type)
+        
+        # Определяем статус на основе общей оценки
+        status = STATUS_QUALITY_CHECKED if overall_score >= QUALITY_SCORE_THRESHOLD else STATUS_QUALITY_REJECTED
+        
+        # Формируем ответ
+        response_data = {
+            "blur_score": round(adjusted_blur, 2),
+            "brightness_score": round(adjusted_brightness, 2),
+            "contrast_score": round(adjusted_contrast, 2),
+            "noise_score": round(noise_score, 2),
+            "overall_score": round(overall_score, 2),
+            "image_type": image_type,
+            "status": status,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Если были переданы данные о креаторе, добавляем их в ответ
+        if creator_data:
+            response_data["creator_data"] = creator_data
+        
+        return response_data
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка при анализе изображения: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

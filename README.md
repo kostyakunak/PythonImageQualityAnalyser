@@ -64,4 +64,43 @@ curl -X POST "https://instagram-image-analyzer.onrender.com/analyze-content" \
 2. Подключите репозиторий
 3. Выберите Python 3.11 как runtime
 4. Используйте `pip install -r requirements.txt` как build command
-5. Используйте `uvicorn main:app --host 0.0.0.0 --port $PORT` как start command 
+5. Используйте `uvicorn main:app --host 0.0.0.0 --port $PORT` как start command
+
+## Интеграция с make.com
+
+Сервис поддерживает интеграцию с make.com для автоматизации процесса анализа изображений из Instagram.
+
+### Параметры API для интеграции
+
+При вызове эндпоинта `/analyze` можно передать следующие параметры:
+
+- `image_url`: URL изображения для анализа
+- `image_file`: Файл изображения (для прямой загрузки)
+- `creator_data`: Дополнительные данные о креаторе и метрики из Instagram (опционально)
+
+### Пример ответа API:
+
+```json
+{
+  "blur_score": 4.25,
+  "brightness_score": 3.85,
+  "contrast_score": 4.10,
+  "noise_score": 4.50,
+  "overall_score": 4.18,
+  "image_type": "portrait",
+  "status": "QualityChecked",
+  "timestamp": "2023-06-15T14:30:45.123456"
+}
+```
+
+### Статусы качества изображения:
+
+- `QualityChecked`: Изображение прошло проверку качества (overall_score >= 3.0)
+- `Rejected`: Изображение не прошло проверку качества (overall_score < 3.0)
+
+### Настройка сценария в make.com:
+
+1. Соберите данные из Instagram через модули Instagram Business
+2. Передайте URL изображения и данные о креаторе в наш API
+3. Получите результаты анализа и статус
+4. Обновите статус в первичной таблице и/или добавьте данные во вторичную таблицу 
