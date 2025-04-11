@@ -1,0 +1,86 @@
+{
+  "image_scores": [
+    {
+      "url": "https://pyxis.nymag.com/v1/imgs/2dd/102/30bc3443ce72015af6f79fc0c5436be3b1-DSC08380.rhorizontal.w1100.jpg",
+      "quality_score": 4.639010329655081,
+      "blur_score": 5.0,
+      "brightness_score": 4.936894110995851,
+      "contrast_score": 4.193973392065535,
+      "noise_score": 4.041956359264898,
+      "image_type": "другое",
+      "detailed_metrics": {
+        "resolution": [
+          1100,
+          733
+        ],
+        "aspect_ratio": 1.500682128240109,
+        "color_mode": "RGB",
+        "blur_details": {
+          "laplacian_variance": 5.0
+        },
+        "brightness_details": {
+          "mean_brightness": 251.7815996607884
+        },
+        "contrast_details": {
+          "std_dev": 107.3657188368777
+        },
+        "image_type": "другое"
+      }
+    },
+    {
+      "url": "https://www.northcentralcollege.edu/sites/default/files/styles/full_image_large/public/2023-07/studio-art-3.jpg?h=a1e1a043&itok=FhGrz2sS",
+      "quality_score": 4.499996335593978,
+      "blur_score": 4.263145640346936,
+      "brightness_score": 4.958151338079705,
+      "contrast_score": 4.290015505530834,
+      "noise_score": 4.6390243371327715,
+      "image_type": "другое",
+      "detailed_metrics": {
+        "resolution": [
+          1440,
+          768
+        ],
+        "aspect_ratio": 1.875,
+        "color_mode": "RGB",
+        "blur_details": {
+          "laplacian_variance": 4.263145640346936
+        },
+        "brightness_details": {
+          "mean_brightness": 252.86571824206496
+        },
+        "contrast_details": {
+          "std_dev": 109.82439694158936
+        },
+        "image_type": "другое"
+      }
+    },
+    {
+      "url": "https://thumbs.dreamstime.com/b/grey-white-bright-orange-knitted-sweaters-pile-stack-cozy-handmade-clothes-different-knitting-patterns-concept-grey-349958675.jpg",
+      "quality_score": 4.601694896483217,
+      "blur_score": 4.815593097835609,
+      "brightness_score": 4.9283893550043665,
+      "contrast_score": 4.162759245998657,
+      "noise_score": 4.289667746599982,
+      "image_type": "другое",
+      "detailed_metrics": {
+        "resolution": [
+          600,
+          900
+        ],
+        "aspect_ratio": 0.6666666666666666,
+        "color_mode": "RGB",
+        "blur_details": {
+          "laplacian_variance": 4.815593097835609
+        },
+        "brightness_details": {
+          "mean_brightness": 251.34785710522272
+        },
+        "contrast_details": {
+          "std_dev": 106.56663669756563
+        },
+        "image_type": "другое"
+      }
+    }
+  ],
+  "average_quality": 4.580233853910759
+}
